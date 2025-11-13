@@ -16,8 +16,10 @@ DiskFS::DiskFS(const std::string& path) : disk_path(path), is_mounted(false) {}
  * @brief 析构函数：确保磁盘在对象销毁前正确卸载
  * 若磁盘处于挂载状态，自动调用unmount()将内存数据写回磁盘并关闭文件，避免数据丢失
  */
-DiskFS::~DiskFS() {
-    if (is_mounted) {
+DiskFS::~DiskFS()
+{
+    if (is_mounted)
+    {
         unmount();
     }
 }
@@ -58,34 +60,88 @@ uint32_t DiskFS::get_data_block_pos(uint32_t block_num) {
  * 块位图是管理数据块分配的核心结构，1位代表1个数据块的状态
  */
 bool DiskFS::set_block_bitmap(uint32_t block_num, bool used) {
-    // 检查块编号是否在数据区范围内（数据块必须属于数据区）
-    if (block_num < super_block.data_start || block_num >= super_block.total_blocks)
-        return false;
+    // 1. 精确检查块编号是否在数据区范围内（[data_start, data_start + data_blocks)）
+    uint32_t data_end = super_block.data_start + super_block.data_blocks;
 
-    char buffer[BLOCK_SIZE];  // 用于读取/写入位图块的缓冲区（1个块大小）
-    uint32_t bitmap_block = super_block.block_bitmap;  // 块位图的起始块号（从超级块获取）
-
-    // 读取块位图所在的块到缓冲区（块位图可能占用多个块，此处简化为1个块）
-    if (!read_block(bitmap_block, buffer)) return false;
-
-    // 计算目标块在块位图中的位置：先转换为数据区的相对索引
-    uint32_t idx = block_num - super_block.data_start;  // 数据区第0块对应索引0
-    uint32_t byte = idx / 8;  // 该块对应位图中的字节下标（1字节=8位）
-    uint8_t bit = idx % 8;    // 该块对应字节中的位下标（0~7）
-
-    // 更新位图中的位：1表示已使用，0表示空闲
-    if (used) {
-        buffer[byte] |= (1 << bit);  // 置位：使用按位或操作
-        super_block.free_blocks--;   // 空闲块数量减1（内存中更新超级块）
-    } else {
-        buffer[byte] &= ~(1 << bit); // 清位：使用按位与+取反操作
-        super_block.free_blocks++;   // 空闲块数量加1（内存中更新超级块）
+    if (block_num < super_block.data_start || block_num >= data_end) {
+        return false; // 块编号超出数据区范围，无效
     }
 
-    // 将更新后的位图块写回磁盘
-    if (!write_block(bitmap_block, buffer)) return false;
+    // 2. 计算目标块在数据区的相对索引（数据区第0块对应idx=0）
+    uint32_t idx = block_num - super_block.data_start;
+
+    // 3. 计算目标位所在的块位图块（处理块位图跨多个块的情况）
+    uint32_t bits_per_block = BLOCK_SIZE * 8; // 每个块位图块可存储的位数（1字节=8位）
+    uint32_t bitmap_block_idx = idx / bits_per_block; // 目标位所在的块位图块索引（0开始）
+
+    // 块位图所占磁盘块数
+    uint32_t block_bitmap_total_bytes = (MAX_BLOCKS + 7) / 8;
+    uint32_t block_bitmap_size = (block_bitmap_total_bytes + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    
+    // 检查块位图块索引是否有效（不超过块位图总块数）
+    if (bitmap_block_idx >= block_bitmap_size) {
+        return false;
+    }
+
+    // 目标块位图块的实际磁盘块号（起始块 + 索引）
+    uint32_t target_bitmap_block = super_block.block_bitmap + bitmap_block_idx;
+
+    // 4. 读取目标块位图块到缓冲区
+    char buffer[BLOCK_SIZE];
+    if (!read_block(target_bitmap_block, buffer)) {
+        return false; // 读取失败
+    }
+
+    // 5. 计算目标位在当前块位图块内的位置
+    uint32_t bit_in_block = idx % bits_per_block; // 目标位在当前块内的位索引
+    uint32_t byte = bit_in_block / 8; // 所在字节下标（0~BLOCK_SIZE-1）
+    uint8_t bit = bit_in_block % 8;   // 所在字节内的位下标（0~7）
+
+    // 检查字节索引是否超出缓冲区范围（避免越界）
+    if (byte >= BLOCK_SIZE) {
+        return false;
+    }
+
+    // 6. 更新位图位状态，并修正空闲块计数
+    if (used) {
+        // 从"空闲"转为"使用"时才减空闲数
+        bool is_currently_free = !(buffer[byte] & (1 << bit));
+        buffer[byte] |= (1 << bit); // 置位（1表示使用）
+        if (is_currently_free) {
+            super_block.free_blocks--;
+        }
+    } else {
+        // 从"使用"转为"空闲"时才增空闲数
+        bool is_currently_used = (buffer[byte] & (1 << bit));
+        buffer[byte] &= ~(1 << bit); // 清位（0表示空闲）
+        if (is_currently_used) {
+            super_block.free_blocks++;
+        }
+    }
+
+    // 7. 将更新后的块位图块写回磁盘
+    if (!write_block(target_bitmap_block, buffer)) {
+        return false; // 写入失败
+    }
+
+    // 8. 同步内存中的超级块到磁盘（保证数据一致性）
+    if (!write_super_block()) {
+        return false; // 超级块同步失败
+    }
+
     return true;
 }
+
+/**
+ * @brief 辅助函数：将内存中的超级块写回磁盘（保证数据一致性）
+ */
+bool DiskFS::write_super_block() 
+{
+    disk_file.seekp(0); // 超级块固定在磁盘0号位置
+    disk_file.write((char*)&super_block, sizeof(SuperBlock));
+    return disk_file.good(); // 检查写入是否成功
+}
+
 
 /**
  * @brief 更新inode位图（标记inode为"已使用"或"空闲"）
@@ -94,31 +150,74 @@ bool DiskFS::set_block_bitmap(uint32_t block_num, bool used) {
  * @return 操作成功返回true；inode编号无效或IO失败返回false
  * inode位图与块位图逻辑类似，1位代表1个inode的状态
  */
-bool DiskFS::set_inode_bitmap(uint32_t inode_num, bool used) {
-    // 检查inode编号是否在有效范围内（0~总inode数-1）
-    if (inode_num >= super_block.total_inodes) return false;
-
-    char buffer[BLOCK_SIZE];  // 用于读取/写入inode位图块的缓冲区
-    uint32_t bitmap_block = super_block.inode_bitmap;  // inode位图的起始块号
-
-    // 读取inode位图所在的块到缓冲区
-    if (!read_block(bitmap_block, buffer)) return false;
-
-    // 计算目标inode在位图中的位置
-    uint32_t byte = inode_num / 8;  // 对应字节下标
-    uint8_t bit = inode_num % 8;    // 对应位下标
-
-    // 更新位图中的位
-    if (used) {
-        buffer[byte] |= (1 << bit);  // 置位：标记为已使用
-        super_block.free_inodes--;   // 空闲inode数量减1
-    } else {
-        buffer[byte] &= ~(1 << bit); // 清位：标记为空闲
-        super_block.free_inodes++;   // 空闲inode数量加1
+bool DiskFS::set_inode_bitmap(uint32_t inode_num, bool used)
+{
+    // 1. 检查inode编号是否在有效范围内（0~总inode数-1）
+    if (inode_num >= super_block.total_inodes) {
+        return false;
     }
 
-    // 将更新后的inode位图写回磁盘
-    if (!write_block(bitmap_block, buffer)) return false;
+    // 2. 计算inode位图每个块可存储的位数（1块=BLOCK_SIZE字节=BLOCK_SIZE*8位）
+    uint32_t bits_per_block = BLOCK_SIZE * 8;
+
+    // 3. 计算目标inode所在的inode位图块索引（处理跨多个块的情况）
+    uint32_t bitmap_block_idx = inode_num / bits_per_block;
+
+    // inode 位图所占磁盘块数
+    uint32_t inode_bitmap_total_bytes = (MAX_INODES + 7) / 8;
+    uint32_t inode_bitmap_size = (inode_bitmap_total_bytes + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    // 检查索引是否超出inode位图总块数（确保在有效范围内）
+    if (bitmap_block_idx >= inode_bitmap_size) {
+        return false;
+    }
+
+    // 目标inode位图块的实际磁盘块号（起始块 + 索引）
+    uint32_t target_bitmap_block = super_block.inode_bitmap + bitmap_block_idx;
+
+    // 4. 读取目标inode位图块到缓冲区
+    char buffer[BLOCK_SIZE];
+    if (!read_block(target_bitmap_block, buffer)) {
+        return false; // 读取失败
+    }
+
+    // 5. 计算目标inode在当前位图块内的位置
+    uint32_t bit_in_block = inode_num % bits_per_block; // 块内位索引
+    uint32_t byte = bit_in_block / 8; // 所在字节下标（0~BLOCK_SIZE-1）
+    uint8_t bit = bit_in_block % 8;   // 字节内的位下标（0~7）
+
+    // 检查字节索引是否超出缓冲区范围（避免越界访问）
+    if (byte >= BLOCK_SIZE) {
+        return false;
+    }
+
+    // 6. 更新位图位状态，并修正空闲inode计数
+    if (used) {
+        // 从"空闲"转为"使用"时才减空闲数
+        bool is_currently_free = !(buffer[byte] & (1 << bit));
+        buffer[byte] |= (1 << bit); // 置位（1表示使用）
+        if (is_currently_free) {
+            super_block.free_inodes--;
+        }
+    } else {
+        // 从"使用"转为"空闲"时才增空闲数
+        bool is_currently_used = (buffer[byte] & (1 << bit));
+        buffer[byte] &= ~(1 << bit); // 清位（0表示空闲）
+        if (is_currently_used) {
+            super_block.free_inodes++;
+        }
+    }
+
+    // 7. 将更新后的inode位图块写回磁盘
+    if (!write_block(target_bitmap_block, buffer)) {
+        return false; // 写入失败
+    }
+
+    // 8. 同步内存中的超级块到磁盘（保证数据一致性）
+    if (!write_super_block()) {
+        return false; // 超级块同步失败
+    }
+
     return true;
 }
 
@@ -213,7 +312,8 @@ bool DiskFS::write_block(uint32_t block_num, const char* buffer) {
  * @return 格式化成功返回true；文件打开失败或IO错误返回false
  * 格式化会清空磁盘原有数据，创建新的文件系统布局，是使用磁盘的前提
  */
-bool DiskFS::format() {
+bool DiskFS::format() 
+{
     // 以读写+二进制模式打开磁盘文件；若文件不存在则创建
     disk_file.open(disk_path, std::ios::in | std::ios::out | std::ios::binary);
     if (!disk_file) {
@@ -222,13 +322,20 @@ bool DiskFS::format() {
         if (!disk_file) return false;  // 创建失败则返回错误
     }
 
-    // 计算文件系统各区域的块数（磁盘布局规划）
+    /**
+    * 计算文件系统各区域的块数（磁盘布局规划）
+    */
     const uint32_t super_block_size = 1;  // 超级块固定占用1个块
-    // 块位图大小：按总块数计算所需位数，转换为字节后向上取整为块数
-    uint32_t block_bitmap_size = (MAX_BLOCKS + 7) / 8 / BLOCK_SIZE + 1;
-    // inode位图大小：按总inode数计算所需位数，转换为字节后向上取整为块数
-    uint32_t inode_bitmap_size = (MAX_INODES + 7) / 8 / BLOCK_SIZE + 1;
-    // inode区大小：总inode数 × 单个inode大小，转换为块数（向上取整）
+
+    // 块位图所占磁盘块数
+    uint32_t block_bitmap_total_bytes = (MAX_BLOCKS + 7) / 8;
+    uint32_t block_bitmap_size = (block_bitmap_total_bytes + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    // inode 位图所占磁盘块数
+    uint32_t inode_bitmap_total_bytes = (MAX_INODES + 7) / 8;
+    uint32_t inode_bitmap_size = (inode_bitmap_total_bytes + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    // 存放所有 inode 需要的磁盘块数
     uint32_t inode_area_size = (MAX_INODES * INODE_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE;
     
     // 初始化超级块（文件系统的元数据核心）
@@ -237,11 +344,12 @@ bool DiskFS::format() {
     super_block.block_size = BLOCK_SIZE;   // 块大小（4KB）
     super_block.total_blocks = MAX_BLOCKS; // 总块数（由磁盘大小和块大小决定）
     super_block.inode_blocks = inode_area_size;  // inode区占用的块数
+    
     // 数据块总数 = 总块数 - 其他区域（超级块+位图+inode区）占用的块数
     super_block.data_blocks = MAX_BLOCKS - (super_block_size + block_bitmap_size + inode_bitmap_size + inode_area_size);
     super_block.total_inodes = MAX_INODES;  // 总inode数（1024）
     super_block.free_blocks = super_block.data_blocks;  // 初始空闲块=总数据块（全部未使用）
-    super_block.free_inodes = MAX_INODES - 1;  // 预留根目录inode（0号），故空闲inode数减1
+    super_block.free_inodes = MAX_INODES;  // 预留根目录inode（0号），此时空闲inode数先不减1
     
     // 记录各区域的起始块号（磁盘布局的关键参数）
     super_block.block_bitmap = super_block_size;  // 块位图紧跟超级块（起始块1）
@@ -255,13 +363,15 @@ bool DiskFS::format() {
 
     // 初始化块位图（全部置0，表示所有数据块空闲）
     char buffer[BLOCK_SIZE] = {0};  // 用0初始化缓冲区（0表示空闲）
-    for (uint32_t i = 0; i < block_bitmap_size; i++) {
+    for (uint32_t i = 0; i < block_bitmap_size; i++) 
+    {
         write_block(super_block.block_bitmap + i, buffer);  // 写入每个位图块
     }
 
     // 初始化inode位图（全部置0，表示所有inode空闲，后续单独标记根目录）
     memset(buffer, 0, BLOCK_SIZE);  // 再次清空缓冲区
-    for (uint32_t i = 0; i < inode_bitmap_size; i++) {
+    for (uint32_t i = 0; i < inode_bitmap_size; i++) 
+    {
         write_block(super_block.inode_bitmap + i, buffer);  // 写入每个inode位图块
     }
 
@@ -271,43 +381,59 @@ bool DiskFS::format() {
     // 初始化所有inode为未使用状态（默认值）
     Inode inode;
     memset(&inode, 0, sizeof(Inode));  // 清空inode结构
-    for (uint32_t i = 0; i < MAX_INODES; i++) {
+    for (uint32_t i = 1; i < MAX_INODES; i++)
+    {
         inode.inode_num = i;  // 设置inode编号
         inode.used = 0;       // 标记为未使用
         disk_file.seekp(get_inode_pos(i));  // 定位到该inode在磁盘中的位置
         disk_file.write((char*)&inode, sizeof(Inode));  // 写入inode数据
     }
 
+    // 为根目录分配一个数据块（存储目录项）
+    int root_block = find_free_block();
+    Inode root_inode;
+
+    if (root_block == -1) {
+        disk_file.close();
+        return false;  // 根目录块分配失败，格式化失败
+    }
+
     // 初始化根目录inode（0号inode，类型为目录）
     time_t now = time(nullptr);  // 获取当前时间戳（用于创建/修改时间）
-    Inode root_inode;
+    
     memset(&root_inode, 0, sizeof(Inode));
     root_inode.inode_num = 0;
     root_inode.type = 2;  // 类型标识：2表示目录（1表示普通文件）
     root_inode.used = 1;  // 标记为已使用
     root_inode.create_time = now;  // 创建时间
     root_inode.modify_time = now;  // 修改时间（初始与创建时间相同）
-    
-    // 为根目录分配一个数据块（存储目录项）
-    int root_block = find_free_block();
-    if (root_block != -1) {
-        root_inode.blocks[0] = root_block;  // 根目录的数据块指针指向该块
-        root_inode.size = BLOCK_SIZE;       // 根目录大小为1个块（4KB）
-        set_block_bitmap(root_block, true);  // 标记该块为已使用（更新块位图）
-        
-        // 初始化根目录内容：包含"当前目录"（.）的目录项
-        memset(buffer, 0, BLOCK_SIZE);  // 清空缓冲区
-        DirEntry* root_entry = (DirEntry*)buffer;  // 将缓冲区视为目录项数组
-        strcpy(root_entry[0].name, ".");           // 目录项名称为"."
-        root_entry[0].inode_num = 0;               // 关联根目录自身的inode（0号）
-        root_entry[0].valid = 1;                   // 标记为有效目录项
-        write_block(root_block, buffer);  // 将根目录数据写入分配的块
-    }
+
+
+    root_inode.blocks[0] = root_block;  // 根目录的数据块指针指向该块
+    root_inode.size = BLOCK_SIZE;       // 根目录大小为1个块（4KB）
 
     // 将初始化好的根目录inode写入磁盘
     disk_file.seekp(get_inode_pos(0));
     disk_file.write((char*)&root_inode, sizeof(Inode));
+    
+    // 初始化根目录内容：包含"当前目录"（.）的目录项
+    memset(buffer, 0, BLOCK_SIZE);  // 清空缓冲区
+    DirEntry* root_entry = (DirEntry*)buffer;  // 将缓冲区视为目录项数组
 
+    // 初始化"."（当前目录）：指向根目录自身的inode（0号）
+    strcpy(root_entry[0].name, ".");
+    root_entry[0].inode_num = 0;  // 关联0号inode（根目录）
+    root_entry[0].valid = 1;      // 标记为有效
+
+    // 初始化".."（父目录）：根目录的父目录是自身，同样指向0号inode
+    strcpy(root_entry[1].name, "..");
+    root_entry[1].inode_num = 0;  // 父目录也指向根目录inode
+    root_entry[1].valid = 1;      // 标记为有效
+
+    set_block_bitmap(root_block, true);  // 标记该块为已使用（更新块位图）
+            
+    write_block(root_block, buffer);  // 将根目录数据写入分配的块
+    
     disk_file.close();  // 格式化完成，关闭磁盘文件
     return true;
 }
@@ -317,7 +443,8 @@ bool DiskFS::format() {
  * @return 挂载成功返回true；文件打开失败或文件系统标识不匹配返回false
  * 挂载是使用磁盘前的必要步骤，会验证文件系统合法性并加载超级块到内存
  */
-bool DiskFS::mount() {
+bool DiskFS::mount()
+{
     if (is_mounted) return true;  // 若已挂载，直接返回成功
 
     // 以读写+二进制模式打开磁盘文件
@@ -343,7 +470,8 @@ bool DiskFS::mount() {
  * @return 卸载成功返回true；未挂载或IO失败返回false
  * 卸载确保内存中的元数据（如空闲块数、inode数）同步到磁盘，避免数据不一致
  */
-bool DiskFS::unmount() {
+bool DiskFS::unmount() 
+{
     if (!is_mounted) return true;  // 若未挂载，直接返回成功
 
     // 将内存中的超级块写回磁盘（保存最新的元数据）

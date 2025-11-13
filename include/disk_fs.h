@@ -16,7 +16,8 @@ const int MAX_BLOCKS = (1024 * 1024 * 100) / BLOCK_SIZE;  // 总块数（100MB�
 /**
  * @brief inode结构：存储文件/目录的元数据
  */
-struct Inode {
+struct Inode 
+{
     uint32_t inode_num;      // inode编号（唯一标识）
     uint32_t size;           // 文件大小（字节）
     uint32_t blocks[16];     // 数据块指针数组（直接块，最多16个块）
@@ -29,7 +30,8 @@ struct Inode {
 /**
  * @brief 目录项结构：存储文件名与inode的映射
  */
-struct DirEntry {
+struct DirEntry
+{
     char name[MAX_FILENAME]; // 文件名（最大28字节，含'\0'）
     uint32_t inode_num;      // 对应的inode编号
     uint8_t valid;           // 有效性：1表示有效，0表示已删除
@@ -38,7 +40,8 @@ struct DirEntry {
 /**
  * @brief 超级块结构：存储文件系统的元数据
  */
-struct SuperBlock {
+struct SuperBlock
+{
     char magic[8];           // 文件系统标识（"SIMFSv1"，用于验证）
     uint32_t block_size;     // 块大小（字节，应等于BLOCK_SIZE）
     uint32_t total_blocks;   // 磁盘总块数
@@ -56,7 +59,8 @@ struct SuperBlock {
 /**
  * @brief 磁盘文件系统类：实现模拟磁盘的各种操作
  */
-class DiskFS {
+class DiskFS
+{
 private:
     std::fstream disk_file;  // 磁盘文件流（用于读写磁盘文件）
     std::string disk_path;   // 磁盘文件路径
@@ -75,6 +79,8 @@ private:
     bool set_inode_bitmap(uint32_t inode_num, bool used);  // 更新inode位图
     int find_free_block();  // 查找空闲数据块
     int find_free_inode();  // 查找空闲inode
+
+    bool write_super_block(); // 辅助函数：将内存中的超级块写回磁盘（保证数据一致性）
 
     // 块读写操作（内部使用，读写指定块）
     bool read_block(uint32_t block_num, char* buffer);   // 读取块
