@@ -251,25 +251,46 @@ int DiskFS::find_free_block() {
 /**
  * @brief 查找第一个空闲的inode（从inode位图中寻找未使用的inode）
  * @return 找到的空闲inode编号；无空闲inode或IO失败返回-1
- * 遍历inode位图，返回第一个位为0（空闲）的inode编号
+ * 遍历inode位图（支持跨多个块），返回第一个位为0（空闲）的inode编号
  */
 int DiskFS::find_free_inode() {
-    char buffer[BLOCK_SIZE];  // 存储inode位图数据的缓冲区
+    // 1. 计算关键参数
+    uint32_t bits_per_block = BLOCK_SIZE * 8;  // 每个块能存储的inode数（1字节=8位）
+    // 动态计算inode位图总块数（也可从超级块添加inode_bitmap_size字段直接获取）
+    uint32_t inode_bitmap_size = (super_block.total_inodes + bits_per_block - 1) / bits_per_block;
+    char buffer[BLOCK_SIZE];
 
-    // 读取inode位图所在的块（简化为1个块）
-    if (!read_block(super_block.inode_bitmap, buffer)) return -1;
+    // 2. 遍历所有inode位图块
+    for (uint32_t bm_block_idx = 0; bm_block_idx < inode_bitmap_size; bm_block_idx++) {
+        // 当前inode位图块的实际磁盘块号（起始块 + 索引）
+        uint32_t target_bm_block = super_block.inode_bitmap + bm_block_idx;
+        
+        // 读取当前inode位图块到缓冲区
+        if (!read_block(target_bm_block, buffer)) {
+            continue;  // 读取失败，尝试下一个块（实际应处理错误）
+        }
 
-    // 遍历位图的每一位，寻找第一个空闲inode（位为0）
-    for (uint32_t i = 0; i < super_block.total_inodes; i++) {
-        uint32_t byte = i / 8;    // 计算当前索引对应的字节
-        uint8_t bit = i % 8;      // 计算当前索引对应的位
+        // 3. 遍历当前块内的每一位
+        for (uint32_t byte = 0; byte < BLOCK_SIZE; byte++) {
+            for (uint8_t bit = 0; bit < 8; bit++) {
+                // 计算当前位对应的全局inode编号（整个位图中的绝对索引）
+                uint32_t global_inode_num = bm_block_idx * bits_per_block + byte * 8 + bit;
+                
+                // 边界检查：不超出总inode数（避免无效inode）
+                if (global_inode_num >= super_block.total_inodes) {
+                    return -1;
+                }
 
-        // 若位为0，说明该inode空闲
-        if (!(buffer[byte] & (1 << bit))) {
-            return i;  // 返回inode编号
+                // 检查当前位是否为0（空闲inode）
+                if (!(buffer[byte] & (1 << bit))) {
+                    return global_inode_num;  // 返回找到的第一个空闲inode编号
+                }
+            }
         }
     }
-    return -1;  // 没有找到空闲inode
+
+    // 遍历完所有inode位图块，无空闲inode
+    return -1;
 }
 
 /**
