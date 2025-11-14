@@ -1,2 +1,4 @@
 disk.img
-test_desk.img
+test_disk.img
+sim_disk
+*.o
