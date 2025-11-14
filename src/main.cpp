@@ -6,7 +6,6 @@
 
 int main(int argc, char* argv[]) 
 {
-
     if (argc != 2) {
         std::cerr << "用法: " << argv[0] << " <磁盘文件>\n";
         std::cerr << "测试模式: " << argv[0] << " <磁盘文件> --test\n";

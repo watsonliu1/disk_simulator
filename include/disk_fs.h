@@ -121,15 +121,6 @@ public:
     bool isMounted() const { return is_mounted; }  // 判断是否已挂载
 
     int get_file_size(int inode_num); // 新增：获取文件大小
-
-    //  // 新增：判断inode是否被使用（测试专用）
-    // bool is_inode_used(uint32_t inode_num) const;
-
-    // // 新增：获取当前内存中的超级块数据（供测试用）
-    // const SuperBlock& get_super_block() const 
-    // {
-    //     return super_block;  // 返回超级块的常量引用（避免拷贝，确保只读）
-    // }
 };
 
 #endif // DISK_FS_H
