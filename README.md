@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-本项目是一个基于 C++ 实现的用户态磁盘模拟文件系统，通过单个文件模拟物理磁盘块设备，实现了文件系统的核心功能，包括磁盘格式化、挂载 / 卸载、文件创建 / 读写 / 删除、目录管理等。系统采用固定块大小（4KB）管理磁盘空间，严格划分超级块、位图区、inode 区和数据区，模拟真实文件系统的底层存储逻辑。
+本项目是一个基于 C++ 实现的用户态磁盘模拟文件系统，通过单个文件模拟物理磁盘块设备，实现了文件系统的核心功能，包括磁盘格式化、挂载 / 卸载、文件创建 / 读写 / 删除、目录管理等。系统采用固定块大小（4KB）管理磁盘空间，严格划分超级块、位图区、inode 区和数据区，模拟真实文件系统的底层存储逻辑。**核心功能已封装为动态共享库（SO 库），实现模块化复用与维护**。
 
 ## 项目结构
 
@@ -21,7 +21,8 @@ disk_simulator/
 │   └── command_parser.cpp   # 命令解析与执行逻辑
 ├── test/                    # 测试目录
 │   └── test_main.cpp        # 单元测试与集成测试代码
-├── Makefile                 # 编译脚本
+├── Makefile                 # 编译脚本（支持SO库、主程序、测试程序分别生成）
+├── libdiskfs.so             # 编译生成的动态共享库（封装底层核心功能）
 └── README.md                # 项目说明文档
 ```
 
@@ -44,25 +45,34 @@ disk_simulator/
 ### 编译项目
 
 ```bash
-# 编译主程序（生成sim_disk可执行文件）
-make sim_disk
+# 核心编译命令：生成【libdiskfs.so动态共享库】和【sim_disk主程序】（默认目标）
+make
 
-# 编译测试程序（生成test_disk可执行文件）
+# 单独生成测试程序（依赖libdiskfs.so，仅需执行一次）
 make test
+```
+
+### 运行前关键配置（必做）
+
+**运行程序前需先设置 SO 库查找路径**，否则系统会提示 “找不到 libdiskfs.so”：
+
+```bash
+# 临时生效（当前终端窗口有效，关闭终端后需重新执行）
+export LD_LIBRARY_PATH=.
 ```
 
 ### 运行模拟器
 
 ```bash
-# 启动模拟器，指定模拟磁盘文件（如disk.img）
+# 启动模拟器，指定模拟磁盘文件（如disk.img，不存在则自动创建）
 ./sim_disk disk.img
 ```
 
 ### 运行测试
 
 ```bash
-# 执行自动测试（测试文件为test_disk.img）
-make test && ./test_disk
+# 执行自动测试（测试专用磁盘为test_disk.img）
+./test_disk
 ```
 
 ## 支持命令
@@ -125,3 +135,5 @@ make test && ./test_disk
 2. 磁盘文件默认名为`disk.img`，测试专用磁盘为`test_disk.img`（已加入`.gitignore`）。
 3. 文件名长度限制为`MAX_FILENAME-1`（含终止符，定义在头文件中）。
 4. 所有操作需在磁盘挂载（`mount`）后执行，否则会提示失败。
+5. **运行程序前必须执行 `export LD_LIBRARY_PATH=.`**，否则会因系统找不到`libdiskfs.so`而运行失败。
+6. 若需永久生效 SO 库路径，可将命令写入用户配置文件：`echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/apue/disk_simulator' >> ~/.bashrc`，执行`source ~/.bashrc`立即生效。
